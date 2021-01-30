@@ -29,8 +29,9 @@ class KeyPlacer():
 
     def GetCurrentKey(self, keyFormat):
         key = self.GetModule(keyFormat.format(self.currentKey))
+        stabilizer = self.board.FindModuleByReference(f"ST{self.currentKey}")
         self.currentKey += 1
-        return key
+        return key, stabilizer
 
 
     def GetCurrentDiode(self, diodeFormat):
@@ -82,20 +83,22 @@ class KeyPlacer():
 
     def Run(self, keyFormat, diodeFormat, routeTracks=False):
         for key in self.layout["keys"]:
-            keyModule = self.GetCurrentKey(keyFormat)
+            keyModule, stabilizer = self.GetCurrentKey(keyFormat)
 
             position = wxPoint((self.keyDistance * key["x"]) + (self.keyDistance * key["width"] // 2),
                 (self.keyDistance * key["y"]) + (self.keyDistance * key["height"] // 2)) + self.referenceCoordinate
             self.SetPosition(keyModule, position)
+            if stabilizer:
+                self.SetPosition(stabilizer, position)
+
+            diodeModule = self.GetCurrentDiode(diodeFormat)
+            self.SetRelativePositionMM(diodeModule, position, [5.08, 3.03])
 
             angle = key["rotation_angle"]
             if angle != 0:
                 rotationReference = wxPoint((self.keyDistance * key["rotation_x"]), (self.keyDistance * key["rotation_y"])) + self.referenceCoordinate
                 self.Rotate(keyModule, rotationReference, angle)
 
-            diodeModule = self.GetCurrentDiode(diodeFormat)
-            self.SetRelativePositionMM(diodeModule, position, [5.08, 3.03])
-            if angle != 0:
                 self.Rotate(diodeModule, rotationReference, angle)
                 if not diodeModule.IsFlipped():
                     diodeModule.Flip(diodeModule.GetPosition())
