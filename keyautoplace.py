@@ -11,6 +11,15 @@ import re
 
 #                 X    Y
 DIODE_OFFSET = [5.08, 5.03]
+DIODE_ROTATION = 90
+from enum import Enum
+
+
+class AddTracks(Enum):
+    NONE = "None"
+    TO_DIODES = "Between diode and swtich"
+    TO_SWITCHES = "Between switches"
+    ALL = "All"
 
 
 def PositionInRotatedCoordinates(point, angle):
@@ -66,7 +75,13 @@ class BoardModifier:
         return module
 
     def SetPosition(self, module, position):
-        self.logger.info("Setting {} module position: {}".format(module.GetReference(), position))
+        if hasattr(module, "GetReference"):
+            ref = module.GetReference()
+        elif hasattr(module, "GetName"):
+            ref = module.GetName()
+        else:
+            ref = f"UNKNOWN ({type(module)})"
+        self.logger.info("Setting {} module position: {}".format(ref, position))
         module.SetPosition(position)
 
     def SetRelativePositionMM(self, module, referencePoint, direction):
@@ -76,7 +91,7 @@ class BoardModifier:
         self.SetPosition(module, position)
 
     def AddTrackSegment(self, start, vector, layer=B_Cu):
-        track = TRACK(self.board)
+        track = PCB_TRACK(self.board)
         track.SetWidth(FromMM(0.25))
         track.SetLayer(layer)
         track.SetStart(start)
@@ -90,7 +105,7 @@ class BoardModifier:
         return segmentEnd
 
     def AddTrackSegmentByPoints(self, start, stop, layer=B_Cu):
-        track = TRACK(self.board)
+        track = PCB_TRACK(self.board)
         track.SetWidth(FromMM(0.25))
         track.SetLayer(layer)
         track.SetStart(start)
@@ -109,6 +124,16 @@ class BoardModifier:
             )
         )
         module.Rotate(rotationReference, angle * -10)
+
+    def AddVia(self, pad, offset=None):
+        self.logger.info("Adding via to {}".format(pad.GetNetname()))
+        via = PCB_VIA(self.board)
+        via.SetWidth(800000)
+        via.SetDrill(400000)
+        via.SetNet(pad.GetNet())
+        self.SetRelativePositionMM(via, pad.GetCenter(), offset)
+        self.board.Add(via)
+        return via
 
 
 class TemplateCopier(BoardModifier):
@@ -219,7 +244,9 @@ class KeyPlacer(BoardModifier):
         # second segment: up to switch pad
         self.AddTrackSegmentByPoints(corner, switchPadPosition)
 
-    def Run(self, keyFormat, stabilizerFormat, diodeFormat, routeTracks=False):
+    def Run(
+        self, keyFormat, stabilizerFormat, diodeFormat, routeTracks=AddTracks.NONE, addVias=False
+    ):
         column_switch_pads = {}
         row_diode_pads = {}
         for key in self.layout["keys"]:
@@ -268,6 +295,7 @@ class KeyPlacer(BoardModifier):
                     diodeModule.SetOrientationDegrees(270)
                 if not diodeModule.IsFlipped():
                     diodeModule.Flip(diodeModule.GetPosition(), True)
+                diodeModule.SetOrientationDegrees(DIODE_ROTATION)
 
             # append pad:
             pad = switchModule.FindPadByNumber("1")
@@ -276,6 +304,8 @@ class KeyPlacer(BoardModifier):
             if match:
                 column_number = match.groups()[0]
                 column_switch_pads.setdefault(column_number, []).append(pad)
+                # if addVias:
+                #     self.AddVia(pad)
             else:
                 self.logger.warning("Switch pad without recognized net name found.")
             # append diode:
@@ -285,13 +315,17 @@ class KeyPlacer(BoardModifier):
             if match:
                 row_number = match.groups()[0]
                 row_diode_pads.setdefault(row_number, []).append(pad)
+                if addVias:
+                    via = self.AddVia(pad, (0, 1))
+                    if routeTracks in (AddTracks.ALL, AddTracks.TO_DIODES):
+                        self.AddTrackSegmentByPoints(pad.GetCenter(), via.GetCenter())
             else:
                 self.logger.warning("Switch pad without recognized net name found.")
 
-            if routeTracks:
+            if routeTracks in (AddTracks.ALL, AddTracks.TO_DIODES):
                 self.RouteSwitchWithDiode(switchModule, diodeModule, angle)
 
-        if routeTracks:
+        if routeTracks in (AddTracks.ALL, AddTracks.TO_SWITCHES):
             # very naive routing approach, will fail in some scenarios:
             for column in column_switch_pads:
                 pads = column_switch_pads[column]
@@ -362,10 +396,39 @@ class KeyAutoPlaceDialog(wx.Dialog):
         row4.Add(diodeAnnotationFormat, 1, wx.EXPAND | wx.ALL, 5)
 
         row5 = wx.BoxSizer(wx.HORIZONTAL)
+        tracksLabel = wx.StaticText(self, -1, "Add tracks:")
+        tracksChoice = wx.ComboBox(
+            self,
+            -1,
+            choices=[
+                AddTracks.NONE.value,
+                AddTracks.TO_DIODES.value,
+                AddTracks.TO_SWITCHES.value,
+                AddTracks.ALL.value,
+            ],
+            value=AddTracks.NONE.value,
+            style=wx.CB_READONLY,
+        )
+        row5.Add(tracksLabel, 1, wx.LEFT | wx.RIGHT | wx.ALIGN_CENTER_VERTICAL, 5)
+        row5.Add(tracksChoice, 1, wx.EXPAND | wx.ALL, 5)
 
-        tracksCheckbox = wx.CheckBox(self, label="Add tracks")
-        tracksCheckbox.SetValue(True)
-        row5.Add(tracksCheckbox, 1, wx.EXPAND | wx.ALL, 5)
+        row5_1 = wx.BoxSizer(wx.HORIZONTAL)
+        diodeOffsetLabel = wx.StaticText(self, -1, "Diode offset (X,Y):")
+        diodeOffsetX = wx.TextCtrl(self, value=str(DIODE_OFFSET[0]))
+        diodeOffsetY = wx.TextCtrl(self, value=str(DIODE_OFFSET[1]))
+
+        row5_2 = wx.BoxSizer(wx.HORIZONTAL)
+        row5_2.Add(diodeOffsetX, 1, wx.RIGHT, 5)
+        row5_2.Add(diodeOffsetY, 1, wx.RIGHT, 5)
+
+        row5_1.Add(diodeOffsetLabel, 1, wx.LEFT | wx.RIGHT | wx.ALIGN_CENTER_VERTICAL, 5)
+        row5_1.Add(row5_2, 1, wx.LEFT | wx.RIGHT | wx.ALIGN_CENTER_VERTICAL)
+
+        rowCheckBoxes = wx.BoxSizer(wx.HORIZONTAL)
+        viasCheck = wx.CheckBox(self, -1, label="Add Via to diode pad")
+        viasCheck.SetValue(True)
+        rowCheckBoxes.Add(viasCheck, 1, wx.RIGHT, 5)
+
 
         row6 = wx.BoxSizer(wx.HORIZONTAL)
 
@@ -382,6 +445,8 @@ class KeyAutoPlaceDialog(wx.Dialog):
         box.Add(row3, 0, wx.EXPAND | wx.ALL, 5)
         box.Add(row4, 0, wx.EXPAND | wx.ALL, 5)
         box.Add(row5, 0, wx.EXPAND | wx.ALL, 5)
+        box.Add(row5_1, 0, wx.EXPAND | wx.ALL, 5)
+        box.Add(rowCheckBoxes, 0, wx.EXPAND | wx.ALL, 5)
         box.Add(row6, 0, wx.EXPAND | wx.ALL, 5)
 
         buttons = self.CreateButtonSizer(wx.OK | wx.CANCEL)
@@ -392,7 +457,8 @@ class KeyAutoPlaceDialog(wx.Dialog):
         self.keyAnnotationFormat = keyAnnotationFormat
         self.stabilizerAnnotationFormat = stabilizerAnnotationFormat
         self.diodeAnnotationFormat = diodeAnnotationFormat
-        self.tracksCheckbox = tracksCheckbox
+        self.tracksChoice = tracksChoice
+        self.viasCheck = viasCheck
         self.templateFilePicker = templateFilePicker
 
     def GetLayoutPath(self):
@@ -407,11 +473,14 @@ class KeyAutoPlaceDialog(wx.Dialog):
     def GetDiodeAnnotationFormat(self):
         return self.diodeAnnotationFormat.GetValue()
 
-    def IsTracks(self):
-        return self.tracksCheckbox.GetValue()
+    def GetAddTracks(self):
+        return AddTracks(self.tracksChoice.GetValue())
 
     def GetTemplatePath(self):
         return self.templateFilePicker.GetPath()
+
+    def GetAddVias(self):
+        return self.viasCheck.GetValue()
 
 
 class KeyAutoPlace(ActionPlugin):
@@ -433,7 +502,7 @@ class KeyAutoPlace(ActionPlugin):
         # set up logger
         logging.basicConfig(
             level=logging.DEBUG,
-            filename="keyautoplace.log",
+            filename="/tmp/keyautoplace.log",
             filemode="w",
             format="%(asctime)s %(name)s %(lineno)d: %(message)s",
             datefmt="%H:%M:%S",
@@ -467,7 +536,8 @@ class KeyAutoPlace(ActionPlugin):
                     dlg.GetKeyAnnotationFormat(),
                     dlg.GetStabilizerAnnotationFormat(),
                     dlg.GetDiodeAnnotationFormat(),
-                    dlg.IsTracks(),
+                    dlg.GetAddTracks(),
+                    dlg.GetAddVias(),
                 )
 
         dlg.Destroy()
